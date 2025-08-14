@@ -12,7 +12,72 @@ A Roblox module for managing global stock across servers using DataStoreService 
 - Callbacks for stock changes and forced stock updates
 - Safe update retries and key rotation support
 - Debug logging and version update notifications
+- Day-of-week and date range restrictions for stock availability
+---
 
+---
+## Update logs, Version "v1.0.8"
+- Stock types (current types: "normal", "datelimited", "dayofweeklimited")
+- Date range restrictions
+- Day-of-week restrictions
+
+## Example usage:
+```lua
+local GlobalStockService = require(path.to.GlobalStockService)
+
+--// Example 1: Normal Stock
+GlobalStockService.CreateStock(
+	"NormalStock", -- stock name
+	{
+		{name = "Apple", chance = 80, minAmount = 1, maxAmount = 5},
+		{name = "Banana", chance = 50, minAmount = 1, maxAmount = 3},
+	}, -- items
+	1, -- minItems
+	2, -- maxItems
+	60 -- restockInterval in seconds
+)
+
+--// Example 2: DateLimited Stock
+GlobalStockService.CreateStock(
+	"HolidayStock",
+	{
+		{name = "CandyCane", chance = 100, minAmount = 1, maxAmount = 2},
+		{name = "GiftBox", chance = 60, minAmount = 1, maxAmount = 1},
+	},
+	1, -- minItems
+	2, -- maxItems
+	200, -- restockInterval
+	"DateLimited", -- type
+	{
+		start = {year = 2025, month = 12, day = 23},
+		["end"] = {year = 2025, month = 12, day = 31}
+	} -- date range
+)
+
+--// Example 3: DayOfWeekLimited Stock
+GlobalStockService.CreateStock(
+	"WeekendStock",
+	{
+		{name = "Chocolate", chance = 90, minAmount = 1, maxAmount = 4},
+		{name = "Juice", chance = 70, minAmount = 1, maxAmount = 2},
+	},
+	1, -- minItems
+	2, -- maxItems
+	5, -- restockInterval
+	"DayOfWeekLimited", -- type
+	{
+		days = {"Thursday", "Sunday"}
+	} -- days of the week
+)
+
+-- Callback to see when stocks change
+GlobalStockService.OnStockChanged(function(stockName, oldStock, newStock, time)
+	print("Stock changed:", stockName)
+	print("Old stock:", oldStock)
+	print("New stock:", newStock)
+	print("Time:", time)
+end)
+```
 ---
 
 ## Installation
