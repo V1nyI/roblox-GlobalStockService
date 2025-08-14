@@ -27,13 +27,23 @@ local _SEED_FALLBACK_OFFSET_1 = 99999
 local _SEED_FALLBACK_OFFSET_2 = 88888
 local _SEED_COUNT_OFFSET = 10000
 
+local DAY_NAME_TO_ID = {
+	sunday = 1,
+	monday = 2,
+	tuesday = 3,
+	wednesday = 4,
+	thursday = 5,
+	friday = 6,
+	saturday = 7
+}
+
 --// Debug config
 local _debug = false
 local _forcedLogLimit = 5
 local _forcedLogCount = 0
 
 --// Private
-local _Version = "1.0.0"
+local _Version = "1.0.8"
 local VERSION_URL = "https://raw.githubusercontent.com/V1nyI/roblox-GlobalStockService/refs/heads/main/Version.txt"
 
 --// Logging Utility
@@ -321,39 +331,89 @@ local function _getCurrentRestockTime(stockData, currentTime)
 	return currentTime - (currentTime % interval)
 end
 
+local function _isDayAllowed(stockData, now)
+	if not stockData.allowedDays then return true end
+	local currentDayId = tonumber(os.date("!%w", now)) + 1
+	return stockData.allowedDays[currentDayId] == true
+end
+
+local function normalizeDayInput(day)
+	if type(day) == "number" then
+		assert(day >= 1 and day <= 7, "Day number must be 1-7")
+		return day
+	elseif type(day) == "string" then
+		local lower = string.lower(day)
+		assert(DAY_NAME_TO_ID[lower], "Invalid day name: " .. tostring(day))
+		return DAY_NAME_TO_ID[lower]
+	else
+		error("Day must be string or number")
+	end
+end
+
+local function convertToTime(date)
+	assert(type(date) == "table" and date.year and date.month and date.day, "Date must have at least {year, month, day}")
+
+	local hour = date.hour or 0
+	local min = date.min or date.minute or 0
+	local sec = date.sec or date.second or 0
+	local timezone = date.timezoneOffset or date.tzOffset or 0
+	
+	local timezoneSeconds = timezone * 3600
+	
+	local timestamp = os.time({
+		year = date.year,
+		month = date.month,
+		day = date.day,
+		hour = hour,
+		min = min,
+		sec = sec
+	})
+
+	return timestamp - timezoneSeconds
+end
+
+local function _isWithinDateRange(stockData, now)
+	if not stockData.dateStart or not stockData.dateEnd then return true end
+	return now >= stockData.dateStart and now <= stockData.dateEnd
+end
+
 local function _stockUpdateLoop(stockName)
 	local stockData = stocks[stockName]
 	if not stockData then return end
-	
+
 	while stockData._running do
 		local now = os.time()
-		local restockTime = _getCurrentRestockTime(stockData, now)
-		
-		local forcedStock = _getForcedStock(stockName)
-		
-		if forcedStock then
-			if stockData._currentStock ~= forcedStock then
-				local oldStock = stockData._currentStock
-				stockData._currentStock = forcedStock
-				_callCallbacks(_onStockForceChangeCallbacks, stockName, oldStock, forcedStock, 0)
-				_log("info", "Forced stock set for '" .. stockName .. "'")
-			end
-		else
-			local predicted = _predictStock(stockData, restockTime)
-			if not predicted or #predicted == 0 then
-				predicted = {}
-			end
 
-			if stockData._currentStock ~= predicted then
+		local inDate = _isWithinDateRange(stockData, now)
+		local inDays = _isDayAllowed(stockData, now)
+		local inWindow = inDate and inDays
+
+		if not inWindow then
+			if stockData._currentStock and #stockData._currentStock > 0 then
 				local oldStock = stockData._currentStock
-				stockData._currentStock = predicted
-				_callCallbacks(_onStockChangedCallbacks, stockName, oldStock, predicted, restockTime)
+				stockData._currentStock = {}
+				_callCallbacks(_onStockChangedCallbacks, stockName, oldStock, {}, 0)
+				_log("info", "Stock '" .. stockName .. "' cleared (out of allowed window).", false)
 			end
+			task.wait(math.max(1, stockData.RESTOCK_INTERVAL or 600))
+		else
+			local forcedStock = _getForcedStock(stockName)
+			if forcedStock then
+				if stockData._currentStock ~= forcedStock then
+					local oldStock = stockData._currentStock
+					stockData._currentStock = forcedStock
+					_callCallbacks(_onStockForceChangeCallbacks, stockName, oldStock, forcedStock, 0)
+				end
+			else
+				local predicted = _predictStock(stockData, now) or {}
+				if stockData._currentStock ~= predicted then
+					local oldStock = stockData._currentStock
+					stockData._currentStock = predicted
+					_callCallbacks(_onStockChangedCallbacks, stockName, oldStock, predicted, now)
+				end
+			end
+			task.wait(math.max(1, stockData.RESTOCK_INTERVAL or 600))
 		end
-		
-		local nextRestock = restockTime + (stockData.RESTOCK_INTERVAL or 600)
-		local waitTime = math.max(1, nextRestock - os.time())
-		task.wait(waitTime)
 	end
 end
 
@@ -367,18 +427,20 @@ end
 	@param minItems number Minimum items to pick
 	@param maxItems number Maximum items to pick
 	@param restockInterval number Interval in seconds for stock refresh
+	@param info table Optional info
 ]]
-function GlobalStockService.CreateStock(stockName, stockItems, minItems, maxItems, restockInterval)
+function GlobalStockService.CreateStock(stockName, stockItems, minItems, maxItems, restockInterval, stockType, Info)
 	assert(type(stockName) == "string", "stockName must be string")
 	assert(type(stockItems) == "table", "stockItems must be table")
 	minItems = tonumber(minItems) or 1
 	maxItems = tonumber(maxItems) or minItems
 	restockInterval = tonumber(restockInterval) or 600
-	
+	stockType = stockType or "Normal"
+
 	if stocks[stockName] then
 		_log("warn", "Stock '" .. stockName .. "' already exists. Overwriting.", true)
 	end
-	
+
 	local stockData = {
 		stockItems = stockItems,
 		minItems = minItems,
@@ -387,16 +449,34 @@ function GlobalStockService.CreateStock(stockName, stockItems, minItems, maxItem
 		globalKey = _getOrCreateGlobalKeyFromDataStore() or _generateRandomKey(),
 		_currentStock = {},
 		_running = true,
+		_type = string.lower(stockType),
 	}
 	
-	stocks[stockName] = stockData
+	if stockType:lower() == "datelimited" or stockType:lower() == "dayofweeklimited" then
+		-- DateLimited setup (Info.start / Info.end with {year,month,day})
+		if Info.start and Info["end"] then
+			stockData.dateStart = convertToTime(Info.start)
+			stockData.dateEnd   = convertToTime(Info["end"])
+		end
+		
+		-- DayOfWeekLimited setup (Info.days = {"Monday", "Friday"})
+		if Info.days then
+			stockData.allowedDays = {}
+			for _, d in ipairs(Info.days) do
+				local dayId = normalizeDayInput(d)
+				stockData.allowedDays[dayId] = true
+			end
+		end
+	end
 	
+	stocks[stockName] = stockData
 	task.spawn(function()
 		_stockUpdateLoop(stockName)
 	end)
 	
 	return stockData
 end
+
 --[[
 	Gets the current stock list for a stock name
 	
@@ -520,6 +600,10 @@ end
 	@param enabled boolean
 ]]
 function GlobalStockService.SetDebug(enabled)
+	if not game:GetService("RunService"):IsStudio() then
+		warn("Debug can only be set in Studio")
+		return false, "Debug can only be set in Studio"
+	end
 	_debug = enabled and true or false
 	if _debug then
 		_log("info", "Debug logging enabled", true)
