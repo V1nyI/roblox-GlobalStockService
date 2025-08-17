@@ -18,6 +18,7 @@ local _onForcedStockExpiredCallbacks = {}
 local _KEY_DATASTORE_NAME = "GlobalStockKeyStore"
 local _KEY_DATASTORE_KEY = "GlobalStockKey_v1"
 local _FORCED_STOCK_KEY = "ForcedNextStock"
+local restockAnchorStore = DataStoreService:GetDataStore("GlobalRestockAnchor")
 local _KEY_LENGTH = 16
 local _MAX_UPDATE_ATTEMPTS = 5
 
@@ -43,8 +44,12 @@ local _forcedLogLimit = 5
 local _forcedLogCount = 0
 
 --// Private
-local _Version = "1.0.8"
+local _Version = "1.1.5"
 local VERSION_URL = "https://raw.githubusercontent.com/V1nyI/roblox-GlobalStockService/refs/heads/main/Version.txt"
+
+--// Global key cache
+local _cachedGlobalKey = nil
+local _fetchingGlobalKey = false
 
 --// Logging Utility
 local function _log(level, msg, force)
@@ -53,14 +58,14 @@ local function _log(level, msg, force)
 		if _forcedLogCount >= _forcedLogLimit then return end
 		_forcedLogCount += 1
 	end
-	
+
 	level = tostring(level):lower()
 	if level == "warn" then
-		warn("[GlobalStockService] " .. tostring(msg))
+		warn("[GlobalStockService] "..tostring(msg))
 	elseif level == "error" then
-		error("[GlobalStockService] " .. tostring(msg))
+		error("[GlobalStockService] "..tostring(msg))
 	else
-		print("[GlobalStockService] " .. tostring(msg))
+		print("[GlobalStockService] "..tostring(msg))
 	end
 end
 
@@ -68,13 +73,13 @@ local function CheckForUpdates(currentVersion)
 	local success, response = pcall(function()
 		return HttpService:GetAsync(VERSION_URL)
 	end)
-	
+
 	if success then
 		local remoteVersion = response:match("%S+")
 		if remoteVersion and remoteVersion ~= currentVersion then
-			warn("[GlobalStockService] A newer version is available: " .. remoteVersion .. " (current: " .. currentVersion .. ")")
+			warn("[GlobalStockService] A newer version is available: "..remoteVersion.." (current: "..currentVersion..")")
 		else
-			print("[GlobalStockService] You are using the latest version: " .. currentVersion)
+			print("[GlobalStockService] You are using the latest version: "..currentVersion)
 		end
 	else
 		warn("[GlobalStockService] Failed to check for updates.")
@@ -118,8 +123,16 @@ local function _generateRandomKey()
 end
 
 local function _getOrCreateGlobalKeyFromDataStore()
-	local store = DataStoreService:GetDataStore(_KEY_DATASTORE_NAME)
+	if _cachedGlobalKey then
+		return _cachedGlobalKey
+	end
 	
+	if _fetchingGlobalKey then
+		return nil
+	end
+	_fetchingGlobalKey = true
+	
+	local store = DataStoreService:GetDataStore(_KEY_DATASTORE_NAME)
 	for attempt = 1, _MAX_UPDATE_ATTEMPTS do
 		local success, result = pcall(function()
 			return store:UpdateAsync(_KEY_DATASTORE_KEY, function(oldValue)
@@ -134,19 +147,39 @@ local function _getOrCreateGlobalKeyFromDataStore()
 		end)
 		
 		if success and type(result) == "table" and result.numbers then
-			_log("info", "Global key obtained on attempt " .. attempt, false)
-			return result.numbers
+			_log("info", "Global key obtained on attempt "..attempt, false)
+			_cachedGlobalKey = result.numbers
+			_fetchingGlobalKey = false
+			return _cachedGlobalKey
 		end
-		
 		task.wait(math.min(attempt, 5))
 	end
 	
 	_log("warn", "Failed to obtain/create global key after retries", true)
+	_fetchingGlobalKey = false
+	return nil
+end
+
+local function _ensureGlobalKeyAsync()
+	if _cachedGlobalKey then
+		return _cachedGlobalKey
+	end
+	
+	local key = _getOrCreateGlobalKeyFromDataStore()
+	if key then
+		return key
+	end
+	
+	task.spawn(function()
+		task.wait(5)
+		_getOrCreateGlobalKeyFromDataStore()
+	end)
+	
 	return nil
 end
 
 local function _forceRotateGlobalKey()
-	local store = DataStoreService:GetDataStore(_KEY_DATASTORE_NAME)
+	local store = DataStoreService:GetDataStore(_KEY_DATASTORE_KEY)
 	
 	local success, result = pcall(function()
 		return store:UpdateAsync(_KEY_DATASTORE_KEY, function()
@@ -159,11 +192,29 @@ local function _forceRotateGlobalKey()
 	
 	if success and type(result) == "table" and result.numbers then
 		_log("info", "Global key rotated successfully", false)
+		_cachedGlobalKey = result.numbers
 		return result.numbers
 	end
 	
-	_log("warn", "Failed to rotate global key: " .. tostring(result), true)
+	_log("warn", "Failed to rotate global key: "..tostring(result), true)
 	return nil
+end
+
+local function getGlobalAnchor()
+	local success, value = pcall(function()
+		return restockAnchorStore:GetAsync("Anchor")
+	end)
+	
+	if success and value then
+		return value
+	end
+	
+	local now = os.time()
+	pcall(function()
+		restockAnchorStore:SetAsync("Anchor", now)
+	end)
+	
+	return now
 end
 
 local function _keyAndTimeToSeed(keyNumbers, restockTime)
@@ -178,6 +229,27 @@ local function _keyAndTimeToSeed(keyNumbers, restockTime)
 	
 	if seed == 0 then seed = _SEED_ZERO_FALLBACK end
 	return seed
+end
+
+--// Deterministic boundary helpers
+
+local function computeDeterministicBoundary(anchor, stockName, interval)
+	local hash = 0
+	for i = 1, #stockName do
+		hash = (hash + string.byte(stockName, i)) % interval
+	end
+	
+	local now = os.time()
+	return now - ((now - (anchor + hash)) % interval)
+end
+
+local function _getDeterministicRestockTime(stockData, currentTime)
+	currentTime = currentTime or os.time()
+	local interval = stockData.RESTOCK_INTERVAL or 100
+	local globalKey = stockData.globalKey
+	local stockName = stockData._stockName or "UnknownStock"
+	
+	return computeDeterministicBoundary(globalKey, stockName, interval)
 end
 
 --// MemoryStore access helpers for forced stock
@@ -246,7 +318,7 @@ local function _callCallbacks(callbacks, stockName, oldStock, newStock, timer)
 		local ok, err = pcall(callback, stockName, oldStock, newStock, timer)
 		
 		if not ok then
-			_log("warn", "Stock callback error for '" .. tostring(stockName) .. "': " .. tostring(err), true)
+			_log("warn", "Stock callback error for '"..tostring(stockName).."': "..tostring(err), true)
 		end
 	end
 end
@@ -327,7 +399,6 @@ end
 local function _getCurrentRestockTime(stockData, currentTime)
 	currentTime = currentTime or os.time()
 	local interval = stockData.RESTOCK_INTERVAL or 100
-	
 	return currentTime - (currentTime % interval)
 end
 
@@ -343,7 +414,7 @@ local function normalizeDayInput(day)
 		return day
 	elseif type(day) == "string" then
 		local lower = string.lower(day)
-		assert(DAY_NAME_TO_ID[lower], "Invalid day name: " .. tostring(day))
+		assert(DAY_NAME_TO_ID[lower], "Invalid day name: "..tostring(day))
 		return DAY_NAME_TO_ID[lower]
 	else
 		error("Day must be string or number")
@@ -352,7 +423,7 @@ end
 
 local function convertToTime(date)
 	assert(type(date) == "table" and date.year and date.month and date.day, "Date must have at least {year, month, day}")
-
+	
 	local hour = date.hour or 0
 	local min = date.min or date.minute or 0
 	local sec = date.sec or date.second or 0
@@ -368,7 +439,7 @@ local function convertToTime(date)
 		min = min,
 		sec = sec
 	})
-
+	
 	return timestamp - timezoneSeconds
 end
 
@@ -377,43 +448,54 @@ local function _isWithinDateRange(stockData, now)
 	return now >= stockData.dateStart and now <= stockData.dateEnd
 end
 
-local function _stockUpdateLoop(stockName)
+local function stocksDifferent(a, b)
+	if not a or not b then return true end
+	if #a ~= #b then return true end
+	for i = 1, #a do
+		local ai, bi = a[i], b[i]
+		if not bi or ai.name ~= bi.name or ai.amount ~= bi.amount then
+			return true
+		end
+	end
+	return false
+end
+
+local function _stockThread(stockName)
 	local stockData = stocks[stockName]
 	if not stockData then return end
-
+	
 	while stockData._running do
 		local now = os.time()
-
 		local inDate = _isWithinDateRange(stockData, now)
 		local inDays = _isDayAllowed(stockData, now)
 		local inWindow = inDate and inDays
-
+		
 		if not inWindow then
 			if stockData._currentStock and #stockData._currentStock > 0 then
 				local oldStock = stockData._currentStock
 				stockData._currentStock = {}
 				_callCallbacks(_onStockChangedCallbacks, stockName, oldStock, {}, 0)
-				_log("info", "Stock '" .. stockName .. "' cleared (out of allowed window).", false)
+				_log("info", "Stock '"..stockName.."' cleared (out of allowed window).", false)
 			end
-			task.wait(math.max(1, stockData.RESTOCK_INTERVAL or 600))
 		else
 			local forcedStock = _getForcedStock(stockName)
 			if forcedStock then
-				if stockData._currentStock ~= forcedStock then
+				if stocksDifferent(stockData._currentStock, forcedStock) then
 					local oldStock = stockData._currentStock
 					stockData._currentStock = forcedStock
 					_callCallbacks(_onStockForceChangeCallbacks, stockName, oldStock, forcedStock, 0)
 				end
 			else
-				local predicted = _predictStock(stockData, now) or {}
-				if stockData._currentStock ~= predicted then
+				local newStock = GlobalStockService.GetCurrentStock(stockName) or {}
+				if stocksDifferent(stockData._currentStock, newStock) then
 					local oldStock = stockData._currentStock
-					stockData._currentStock = predicted
-					_callCallbacks(_onStockChangedCallbacks, stockName, oldStock, predicted, now)
+					stockData._currentStock = newStock
+					_callCallbacks(_onStockChangedCallbacks, stockName, oldStock, newStock, os.time())
 				end
 			end
-			task.wait(math.max(1, stockData.RESTOCK_INTERVAL or 600))
 		end
+		
+		task.wait(0.5)
 	end
 end
 
@@ -434,33 +516,42 @@ function GlobalStockService.CreateStock(stockName, stockItems, minItems, maxItem
 	assert(type(stockItems) == "table", "stockItems must be table")
 	minItems = tonumber(minItems) or 1
 	maxItems = tonumber(maxItems) or minItems
-	restockInterval = tonumber(restockInterval) or 600
+	restockInterval = tonumber(restockInterval) or 50
 	stockType = stockType or "Normal"
-
+	
 	if stocks[stockName] then
-		_log("warn", "Stock '" .. stockName .. "' already exists. Overwriting.", true)
+		_log("warn", "Stock '"..stockName.."' already exists. Overwriting.", true)
 	end
-
+	
+	local globalKey = _ensureGlobalKeyAsync()
+	if not globalKey then
+		task.spawn(function()
+			task.wait(5)
+			_ensureGlobalKeyAsync()
+		end)
+	end
+	
 	local stockData = {
 		stockItems = stockItems,
 		minItems = minItems,
 		maxItems = maxItems,
 		RESTOCK_INTERVAL = restockInterval,
-		globalKey = _getOrCreateGlobalKeyFromDataStore() or _generateRandomKey(),
+		globalKey = globalKey,
 		_currentStock = {},
 		_running = true,
 		_type = string.lower(stockType),
+		_stockName = stockName
 	}
 	
 	if stockType:lower() == "datelimited" or stockType:lower() == "dayofweeklimited" then
 		-- DateLimited setup (Info.start / Info.end with {year,month,day})
-		if Info.start and Info["end"] then
+		if Info and Info.start and Info["end"] then
 			stockData.dateStart = convertToTime(Info.start)
 			stockData.dateEnd   = convertToTime(Info["end"])
 		end
 		
 		-- DayOfWeekLimited setup (Info.days = {"Monday", "Friday"})
-		if Info.days then
+		if Info and Info.days then
 			stockData.allowedDays = {}
 			for _, d in ipairs(Info.days) do
 				local dayId = normalizeDayInput(d)
@@ -471,7 +562,7 @@ function GlobalStockService.CreateStock(stockName, stockItems, minItems, maxItem
 	
 	stocks[stockName] = stockData
 	task.spawn(function()
-		_stockUpdateLoop(stockName)
+		_stockThread(stockName)
 	end)
 	
 	return stockData
@@ -481,16 +572,36 @@ end
 	Gets the current stock list for a stock name
 	
 	@param stockName string
-	@return table Current stock array 
+	@return table
 ]]
 function GlobalStockService.GetCurrentStock(stockName)
 	local stockData = stocks[stockName]
+	if not stockData then return {} end
 	
-	if stockData then
-		return stockData._currentStock or {}
+	local anchor = getGlobalAnchor()
+	local restockTime = computeDeterministicBoundary(anchor, stockName, stockData.RESTOCK_INTERVAL)
+	
+	local predictedStock = _predictStock(stockData, restockTime)
+	return predictedStock
+end
+
+--[[
+	Gets the deterministic restock boundary and offset for a stock
+	
+	@param stockName string
+	@return currentBoundary, offset
+]]
+function GlobalStockService.GetDeterministicBoundary(stockName)
+	local stockData = stocks[stockName]
+	if not stockData then
+		return nil
 	end
-	
-	return nil
+	local globalKey = stockData.globalKey or _ensureGlobalKeyAsync()
+	if not globalKey then
+		return nil
+	end
+	local interval = stockData.RESTOCK_INTERVAL or 100
+	return computeDeterministicBoundary(globalKey, stockName, interval)
 end
 
 --[[
@@ -508,7 +619,7 @@ function GlobalStockService.ForceNextStock(stockName, stockList, restocks)
 	
 	local stockData = stocks[stockName]
 	if not stockData then
-		_log("warn", "ForceNextStock failed: Stock '" .. stockName .. "' does not exist", true)
+		_log("warn", "ForceNextStock failed: Stock '"..stockName.."' does not exist", true)
 		return false
 	end
 	
@@ -518,7 +629,7 @@ function GlobalStockService.ForceNextStock(stockName, stockList, restocks)
 	stockData._currentStock = stockList
 	_callCallbacks(_onStockForceChangeCallbacks, stockName, oldStock, stockList, 0)
 	
-	_log("info", "Forced stock set for '" .. stockName .. "' with expiration in " .. tostring(restocks) .. " restocks", false)
+	_log("info", "Forced stock set for '"..stockName.."' with expiration in "..tostring(restocks).." restocks", false)
 	return true
 end
 
@@ -531,7 +642,7 @@ function GlobalStockService.ClearForcedStock(stockName)
 	assert(type(stockName) == "string", "stockName must be string")
 	
 	_clearForcedStockInMemoryStore(stockName)
-	_log("info", "Forced stock cleared for '" .. stockName .. "'", false)
+	_log("info", "Forced stock cleared for '"..stockName.."'", false)
 end
 
 --[[
@@ -573,6 +684,7 @@ function GlobalStockService.ForceRotateGlobalKey()
 	local newKey = _forceRotateGlobalKey()
 	
 	if newKey then
+		_cachedGlobalKey = newKey
 		for name, stockData in pairs(stocks) do
 			stockData.globalKey = newKey
 		end
