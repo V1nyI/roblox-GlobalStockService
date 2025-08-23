@@ -44,7 +44,7 @@ local _forcedLogLimit = 5
 local _forcedLogCount = 0
 
 --// Private
-local _Version = "1.1.5"
+local _Version = "1.1.8"
 local VERSION_URL = "https://raw.githubusercontent.com/V1nyI/roblox-GlobalStockService/refs/heads/main/Version.txt"
 
 --// Global key cache
@@ -95,14 +95,14 @@ local function _rol32(x, n)
 	n = n % 32
 	local left = bit32.lshift(x, n)
 	local right = bit32.rshift(x, 32 - n)
-	
+
 	return bit32.band(bit32.bor(left, right), 0xFFFFFFFF)
 end
 
 local function _makeXorShift32(seed)
 	local s = bit32.band(tonumber(seed) or 0, 0xFFFFFFFF)
 	if s == 0 then s = _SEED_INITIAL_ZERO end
-	
+
 	return function()
 		s = bit32.bxor(s, bit32.lshift(s, 13))
 		s = bit32.bxor(s, bit32.rshift(s, 17))
@@ -118,7 +118,7 @@ local function _generateRandomKey()
 	for i = 1, _KEY_LENGTH do
 		key[i] = rng:NextInteger(0, 0x7FFFFFFF)
 	end
-	
+
 	return key
 end
 
@@ -126,12 +126,12 @@ local function _getOrCreateGlobalKeyFromDataStore()
 	if _cachedGlobalKey then
 		return _cachedGlobalKey
 	end
-	
+
 	if _fetchingGlobalKey then
 		return nil
 	end
 	_fetchingGlobalKey = true
-	
+
 	local store = DataStoreService:GetDataStore(_KEY_DATASTORE_NAME)
 	for attempt = 1, _MAX_UPDATE_ATTEMPTS do
 		local success, result = pcall(function()
@@ -145,7 +145,7 @@ local function _getOrCreateGlobalKeyFromDataStore()
 				}
 			end)
 		end)
-		
+
 		if success and type(result) == "table" and result.numbers then
 			_log("info", "Global key obtained on attempt "..attempt, false)
 			_cachedGlobalKey = result.numbers
@@ -154,7 +154,7 @@ local function _getOrCreateGlobalKeyFromDataStore()
 		end
 		task.wait(math.min(attempt, 5))
 	end
-	
+
 	_log("warn", "Failed to obtain/create global key after retries", true)
 	_fetchingGlobalKey = false
 	return nil
@@ -164,23 +164,23 @@ local function _ensureGlobalKeyAsync()
 	if _cachedGlobalKey then
 		return _cachedGlobalKey
 	end
-	
+
 	local key = _getOrCreateGlobalKeyFromDataStore()
 	if key then
 		return key
 	end
-	
+
 	task.spawn(function()
 		task.wait(5)
 		_getOrCreateGlobalKeyFromDataStore()
 	end)
-	
+
 	return nil
 end
 
 local function _forceRotateGlobalKey()
 	local store = DataStoreService:GetDataStore(_KEY_DATASTORE_KEY)
-	
+
 	local success, result = pcall(function()
 		return store:UpdateAsync(_KEY_DATASTORE_KEY, function()
 			return {
@@ -189,13 +189,13 @@ local function _forceRotateGlobalKey()
 			}
 		end)
 	end)
-	
+
 	if success and type(result) == "table" and result.numbers then
 		_log("info", "Global key rotated successfully", false)
 		_cachedGlobalKey = result.numbers
 		return result.numbers
 	end
-	
+
 	_log("warn", "Failed to rotate global key: "..tostring(result), true)
 	return nil
 end
@@ -204,29 +204,29 @@ local function getGlobalAnchor()
 	local success, value = pcall(function()
 		return restockAnchorStore:GetAsync("Anchor")
 	end)
-	
+
 	if success and value then
 		return value
 	end
-	
+
 	local now = os.time()
 	pcall(function()
 		restockAnchorStore:SetAsync("Anchor", now)
 	end)
-	
+
 	return now
 end
 
 local function _keyAndTimeToSeed(keyNumbers, restockTime)
 	local seed = bit32.band(tonumber(restockTime) or os.time(), 0xFFFFFFFF)
-	
+
 	for i = 1, #keyNumbers do
 		local num = keyNumbers[i] or 0
 		local rotated = _rol32(bit32.band(num, 0xFFFFFFFF), i)
 		seed = bit32.bxor(seed, rotated)
 		seed = bit32.band(seed + (num % 0x100000000), 0xFFFFFFFF)
 	end
-	
+
 	if seed == 0 then seed = _SEED_ZERO_FALLBACK end
 	return seed
 end
@@ -238,7 +238,7 @@ local function computeDeterministicBoundary(anchor, stockName, interval)
 	for i = 1, #stockName do
 		hash = (hash + string.byte(stockName, i)) % interval
 	end
-	
+
 	local now = os.time()
 	return now - ((now - (anchor + hash)) % interval)
 end
@@ -248,7 +248,7 @@ local function _getDeterministicRestockTime(stockData, currentTime)
 	local interval = stockData.RESTOCK_INTERVAL or 100
 	local globalKey = stockData.globalKey
 	local stockName = stockData._stockName or "UnknownStock"
-	
+
 	return computeDeterministicBoundary(globalKey, stockName, interval)
 end
 
@@ -260,32 +260,32 @@ end
 
 local function _getForcedStockFromMemoryStore()
 	local memStore = _getMemoryStoreMap()
-	
+
 	local success, data = pcall(function()
 		return memStore:GetRangeAsync(Enum.SortDirection.Ascending, 100)
 	end)
-	
+
 	if success and data then
 		local forcedStocks = {}
-		
+
 		for _, entry in ipairs(data) do
 			if type(entry.value) == "table" and entry.key then
 				forcedStocks[entry.key] = entry.value
 			end
 		end
-		
+
 		return forcedStocks
 	end
-	
+
 	return nil
 end
 
 local function _saveForcedStockToMemoryStore(stockName, stockList, restocks)
 	local memStore = _getMemoryStoreMap()
-	
+
 	local expiration = tonumber(restocks) or 1
 	expiration = expiration * (stocks[stockName] and stocks[stockName].RESTOCK_INTERVAL or 600)
-	
+
 	pcall(function()
 		memStore:SetAsync(stockName, stockList, expiration)
 	end)
@@ -293,7 +293,7 @@ end
 
 local function _clearForcedStockInMemoryStore(stockName)
 	local memStore = _getMemoryStoreMap()
-	
+
 	pcall(function()
 		memStore:RemoveAsync(stockName)
 	end)
@@ -301,22 +301,22 @@ end
 
 local function _getForcedStock(stockName)
 	local map = _getMemoryStoreMap()
-	
+
 	local success, forcedStock = pcall(function()
 		return map:GetAsync(stockName)
 	end)
-	
+
 	if success and type(forcedStock) == "table" then
 		return forcedStock
 	end
-	
+
 	return nil
 end
 
 local function _callCallbacks(callbacks, stockName, oldStock, newStock, timer)
 	for _, callback in ipairs(callbacks) do
 		local ok, err = pcall(callback, stockName, oldStock, newStock, timer)
-		
+
 		if not ok then
 			_log("warn", "Stock callback error for '"..tostring(stockName).."': "..tostring(err), true)
 		end
@@ -326,10 +326,10 @@ end
 --// Predict stock based on seed and stock data
 local function _predictStock(stockData, restockTime)
 	assert(stockData.globalKey and type(stockData.globalKey) == "table", "Global key not set")
-	
+
 	local seed = _keyAndTimeToSeed(stockData.globalKey, restockTime)
 	local rand = _makeXorShift32(seed)
-	
+
 	local candidates = {}
 	
 	for _, itemData in ipairs(stockData.stockItems) do
@@ -339,7 +339,7 @@ local function _predictStock(stockData, restockTime)
 				local chance = math.clamp(tonumber(itemData.chance) or 100, 0, 100)
 				local minAmount = math.max(1, tonumber(itemData.minAmount) or 1)
 				local maxAmount = math.max(minAmount, tonumber(itemData.maxAmount) or minAmount)
-				
+
 				if rand() <= (chance / 100) then
 					local amountRand = _makeXorShift32(seed + (#candidates + 1))
 					local amount = minAmount
@@ -353,33 +353,38 @@ local function _predictStock(stockData, restockTime)
 		end
 	end
 	
-	if #candidates == 0 and #stockData.stockItems > 0 then
-		local fallbackRand = _makeXorShift32(seed + _SEED_FALLBACK_OFFSET_1)
-		local idx = 1 + math.floor(fallbackRand() * #stockData.stockItems)
-		idx = math.clamp(idx, 1, #stockData.stockItems)
+	if #candidates < stockData.minItems then
+		local missing = stockData.minItems - #candidates
+		local pool = {}
 		
-		local fallbackItem = stockData.stockItems[idx]
-		local minAmount = math.max(1, tonumber(fallbackItem.minAmount) or 1)
-		local maxAmount = math.max(minAmount, tonumber(fallbackItem.maxAmount) or minAmount)
-		
-		local amount = minAmount
-		if maxAmount > minAmount then
-			local amountRand = _makeXorShift32(seed + _SEED_FALLBACK_OFFSET_2)
-			amount = minAmount + math.floor(amountRand() * (maxAmount - minAmount + 1))
-			amount = math.min(amount, maxAmount)
+		for _, item in ipairs(stockData.stockItems) do
+			local alreadyIn = false
+			for _, cand in ipairs(candidates) do
+				if cand.name == item.name then
+					alreadyIn = true
+					break
+				end
+			end
+			if not alreadyIn then
+				table.insert(pool, item)
+			end
 		end
-		
-		return {{name = fallbackItem.name or "Unknown", amount = amount}}
-	end
-	
-	local minCount = math.max(1, math.min(stockData.minItems, #candidates))
-	local maxCount = math.max(minCount, math.min(stockData.maxItems, #candidates))
-	local countToReturn = minCount
-	
-	if maxCount > minCount then
-		local randCount = _makeXorShift32(seed + _SEED_COUNT_OFFSET)
-		countToReturn = minCount + math.floor(randCount() * (maxCount - minCount + 1))
-		countToReturn = math.min(countToReturn, maxCount)
+
+		local fillerRand = _makeXorShift32(seed + 123456)
+		for i = 1, missing do
+			if #pool == 0 then break end
+			local idx = 1 + math.floor(fillerRand() * #pool)
+			local item = table.remove(pool, idx)
+
+			local minAmount = math.max(1, tonumber(item.minAmount) or 1)
+			local maxAmount = math.max(minAmount, tonumber(item.maxAmount) or minAmount)
+			local amount = minAmount
+			if maxAmount > minAmount then
+				amount = minAmount + math.floor(fillerRand() * (maxAmount - minAmount + 1))
+				amount = math.min(amount, maxAmount)
+			end
+			table.insert(candidates, {name = item.name, amount = amount})
+		end
 	end
 	
 	for i = #candidates, 2, -1 do
@@ -387,12 +392,22 @@ local function _predictStock(stockData, restockTime)
 		candidates[i], candidates[j] = candidates[j], candidates[i]
 	end
 	
-	local predictedStock = {}
+	local minCount = stockData.minItems
+	local maxCount = math.min(stockData.maxItems, #candidates)
+
+	local countToReturn
+	if maxCount > minCount then
+		local randCount = _makeXorShift32(seed + _SEED_COUNT_OFFSET)
+		countToReturn = minCount + math.floor(randCount() * (maxCount - minCount + 1))
+	else
+		countToReturn = minCount
+	end
 	
+	local predictedStock = {}
 	for i = 1, countToReturn do
 		table.insert(predictedStock, candidates[i])
 	end
-	
+
 	return predictedStock
 end
 
@@ -423,14 +438,14 @@ end
 
 local function convertToTime(date)
 	assert(type(date) == "table" and date.year and date.month and date.day, "Date must have at least {year, month, day}")
-	
+
 	local hour = date.hour or 0
 	local min = date.min or date.minute or 0
 	local sec = date.sec or date.second or 0
 	local timezone = date.timezoneOffset or date.tzOffset or 0
-	
+
 	local timezoneSeconds = timezone * 3600
-	
+
 	local timestamp = os.time({
 		year = date.year,
 		month = date.month,
@@ -439,7 +454,7 @@ local function convertToTime(date)
 		min = min,
 		sec = sec
 	})
-	
+
 	return timestamp - timezoneSeconds
 end
 
@@ -463,13 +478,13 @@ end
 local function _stockThread(stockName)
 	local stockData = stocks[stockName]
 	if not stockData then return end
-	
+
 	while stockData._running do
 		local now = os.time()
 		local inDate = _isWithinDateRange(stockData, now)
 		local inDays = _isDayAllowed(stockData, now)
 		local inWindow = inDate and inDays
-		
+
 		if not inWindow then
 			if stockData._currentStock and #stockData._currentStock > 0 then
 				local oldStock = stockData._currentStock
@@ -494,7 +509,7 @@ local function _stockThread(stockName)
 				end
 			end
 		end
-		
+
 		task.wait(0.5)
 	end
 end
@@ -518,11 +533,11 @@ function GlobalStockService.CreateStock(stockName, stockItems, minItems, maxItem
 	maxItems = tonumber(maxItems) or minItems
 	restockInterval = tonumber(restockInterval) or 50
 	stockType = stockType or "Normal"
-	
+
 	if stocks[stockName] then
 		_log("warn", "Stock '"..stockName.."' already exists. Overwriting.", true)
 	end
-	
+
 	local globalKey = _ensureGlobalKeyAsync()
 	if not globalKey then
 		task.spawn(function()
@@ -530,7 +545,7 @@ function GlobalStockService.CreateStock(stockName, stockItems, minItems, maxItem
 			_ensureGlobalKeyAsync()
 		end)
 	end
-	
+
 	local stockData = {
 		stockItems = stockItems,
 		minItems = minItems,
@@ -542,14 +557,14 @@ function GlobalStockService.CreateStock(stockName, stockItems, minItems, maxItem
 		_type = string.lower(stockType),
 		_stockName = stockName
 	}
-	
+
 	if stockType:lower() == "datelimited" or stockType:lower() == "dayofweeklimited" then
 		-- DateLimited setup (Info.start / Info.end with {year,month,day})
 		if Info and Info.start and Info["end"] then
 			stockData.dateStart = convertToTime(Info.start)
 			stockData.dateEnd   = convertToTime(Info["end"])
 		end
-		
+
 		-- DayOfWeekLimited setup (Info.days = {"Monday", "Friday"})
 		if Info and Info.days then
 			stockData.allowedDays = {}
@@ -559,12 +574,12 @@ function GlobalStockService.CreateStock(stockName, stockItems, minItems, maxItem
 			end
 		end
 	end
-	
+
 	stocks[stockName] = stockData
 	task.spawn(function()
 		_stockThread(stockName)
 	end)
-	
+
 	return stockData
 end
 
@@ -577,10 +592,10 @@ end
 function GlobalStockService.GetCurrentStock(stockName)
 	local stockData = stocks[stockName]
 	if not stockData then return {} end
-	
+
 	local anchor = getGlobalAnchor()
 	local restockTime = computeDeterministicBoundary(anchor, stockName, stockData.RESTOCK_INTERVAL)
-	
+
 	local predictedStock = _predictStock(stockData, restockTime)
 	return predictedStock
 end
@@ -614,21 +629,21 @@ end
 function GlobalStockService.ForceNextStock(stockName, stockList, restocks)
 	assert(type(stockName) == "string", "stockName must be string")
 	assert(type(stockList) == "table", "stockList must be table")
-	
+
 	restocks = tonumber(restocks) or 1
-	
+
 	local stockData = stocks[stockName]
 	if not stockData then
 		_log("warn", "ForceNextStock failed: Stock '"..stockName.."' does not exist", true)
 		return false
 	end
-	
+
 	_saveForcedStockToMemoryStore(stockName, stockList, restocks)
-	
+
 	local oldStock = stockData._currentStock
 	stockData._currentStock = stockList
 	_callCallbacks(_onStockForceChangeCallbacks, stockName, oldStock, stockList, 0)
-	
+
 	_log("info", "Forced stock set for '"..stockName.."' with expiration in "..tostring(restocks).." restocks", false)
 	return true
 end
@@ -640,7 +655,7 @@ end
 ]]
 function GlobalStockService.ClearForcedStock(stockName)
 	assert(type(stockName) == "string", "stockName must be string")
-	
+
 	_clearForcedStockInMemoryStore(stockName)
 	_log("info", "Forced stock cleared for '"..stockName.."'", false)
 end
@@ -682,7 +697,7 @@ end
 ]]
 function GlobalStockService.ForceRotateGlobalKey()
 	local newKey = _forceRotateGlobalKey()
-	
+
 	if newKey then
 		_cachedGlobalKey = newKey
 		for name, stockData in pairs(stocks) do
@@ -690,7 +705,7 @@ function GlobalStockService.ForceRotateGlobalKey()
 		end
 		return true, newKey
 	end
-	
+
 	return false, "Failed to rotate global key"
 end
 
