@@ -44,11 +44,12 @@ local _forcedLogLimit = 5
 local _forcedLogCount = 0
 
 --// Private
-local _Version = "1.1.8"
+local _Version = "1.2.0"
 local VERSION_URL = "https://raw.githubusercontent.com/V1nyI/roblox-GlobalStockService/refs/heads/main/Version.txt"
 
 --// Global key cache
 local _cachedGlobalKey = nil
+local _cachedAnchorKey = nil
 local _fetchingGlobalKey = false
 
 --// Logging Utility
@@ -201,16 +202,22 @@ local function _forceRotateGlobalKey()
 end
 
 local function getGlobalAnchor()
+	if _cachedAnchorKey ~= nil then
+		return _cachedAnchorKey
+	end
+	
 	local success, value = pcall(function()
 		return restockAnchorStore:GetAsync("Anchor")
 	end)
 
 	if success and value then
+		_cachedAnchorKey = value
 		return value
 	end
 
 	local now = os.time()
 	pcall(function()
+		_cachedAnchorKey = now
 		restockAnchorStore:SetAsync("Anchor", now)
 	end)
 
@@ -478,18 +485,18 @@ end
 local function _stockThread(stockName)
 	local stockData = stocks[stockName]
 	if not stockData then return end
-
+	
 	while stockData._running do
 		local now = os.time()
 		local inDate = _isWithinDateRange(stockData, now)
 		local inDays = _isDayAllowed(stockData, now)
 		local inWindow = inDate and inDays
-
+		
 		if not inWindow then
 			if stockData._currentStock and #stockData._currentStock > 0 then
 				local oldStock = stockData._currentStock
 				stockData._currentStock = {}
-				_callCallbacks(_onStockChangedCallbacks, stockName, oldStock, {}, 0)
+				_callCallbacks(_onStockChangedCallbacks, stockName, oldStock, {}, os.time())
 				_log("info", "Stock '"..stockName.."' cleared (out of allowed window).", false)
 			end
 		else
@@ -498,19 +505,20 @@ local function _stockThread(stockName)
 				if stocksDifferent(stockData._currentStock, forcedStock) then
 					local oldStock = stockData._currentStock
 					stockData._currentStock = forcedStock
-					_callCallbacks(_onStockForceChangeCallbacks, stockName, oldStock, forcedStock, 0)
+					_callCallbacks(_onStockForceChangeCallbacks, stockName, oldStock, forcedStock, os.time())
 				end
 			else
+				local nextRestock = GlobalStockService.GetNextRestockTime(stockName)
+				local timeUntilNext = math.max(0, nextRestock - now)
+				
+				task.wait(timeUntilNext)
+				
 				local newStock = GlobalStockService.GetCurrentStock(stockName) or {}
-				if stocksDifferent(stockData._currentStock, newStock) then
-					local oldStock = stockData._currentStock
-					stockData._currentStock = newStock
-					_callCallbacks(_onStockChangedCallbacks, stockName, oldStock, newStock, os.time())
-				end
+				local oldStock = stockData._currentStock
+				stockData._currentStock = newStock
+				_callCallbacks(_onStockChangedCallbacks, stockName, oldStock, newStock, nextRestock)
 			end
 		end
-
-		task.wait(0.5)
 	end
 end
 
@@ -639,13 +647,42 @@ function GlobalStockService.ForceNextStock(stockName, stockList, restocks)
 	end
 
 	_saveForcedStockToMemoryStore(stockName, stockList, restocks)
-
+	
 	local oldStock = stockData._currentStock
 	stockData._currentStock = stockList
 	_callCallbacks(_onStockForceChangeCallbacks, stockName, oldStock, stockList, 0)
 
 	_log("info", "Forced stock set for '"..stockName.."' with expiration in "..tostring(restocks).." restocks", false)
 	return true
+end
+
+--[[
+    Gets the next restock timestamp for a given stock
+    
+    @param stockName string
+    @return number
+]]
+function GlobalStockService.GetNextRestockTime(stockName)
+	local stockData = stocks[stockName]
+	if not stockData then return nil end
+	
+	local anchor = getGlobalAnchor()
+	local lastBoundary = computeDeterministicBoundary(anchor, stockName, stockData.RESTOCK_INTERVAL)
+	
+	return lastBoundary + stockData.RESTOCK_INTERVAL
+end
+
+--[[
+    Gets the time remaining (in seconds) until the next restock
+    
+    @param stockName string
+    @return number | nil
+]]
+function GlobalStockService.GetTimeUntilRestock(stockName)
+	local nextRestock = GlobalStockService.GetNextRestockTime(stockName)
+	if not nextRestock then return nil end
+	
+	return math.max(0, nextRestock - os.time())
 end
 
 --[[
